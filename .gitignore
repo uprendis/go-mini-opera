@@ -33,7 +33,7 @@ glide.lock
 *.tgz
 *.zip
 
-# lachesis project specific
+# miniopera project specific
 scripts/certs
 scripts/nodes
 scripts/peers.json
@@ -41,7 +41,7 @@ scripts/docker/upx
 nodes
 peers.json
 certs
-lachesis_*
+miniopera_*
 !*.go
 *.log
 *.graph

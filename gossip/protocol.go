@@ -1,16 +1,10 @@
 package gossip
 
 import (
-	"math/big"
-
+	"github.com/Fantom-foundation/lachesis-base/hash"
+	"github.com/Fantom-foundation/lachesis-base/inter/idx"
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core/types"
-	notify "github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/rlp"
-
-	"github.com/Fantom-foundation/go-lachesis/evmcore"
-	"github.com/Fantom-foundation/go-lachesis/hash"
-	"github.com/Fantom-foundation/go-lachesis/inter/idx"
 )
 
 // Constants to match up protocol versions and messages
@@ -19,7 +13,7 @@ const (
 )
 
 // protocolName is the official short name of the protocol used during capability negotiation.
-const protocolName = "lachesis"
+const protocolName = "miniopera"
 
 // ProtocolVersions are the supported versions of the protocol (first is primary).
 var ProtocolVersions = []uint{lachesis62}
@@ -31,11 +25,8 @@ const protocolMaxMsgSize = 10 * 1024 * 1024 // Maximum cap on the size of a prot
 
 // protocol message codes
 const (
-	// Protocol messages belonging to eth/62
-	EthStatusMsg = 0x00
-	EvmTxMsg     = 0x02
-
-	// Protocol messages belonging to lachesis/62
+	// Protocol messages belonging to miniopera/62
+	StatusMsg = 0x00
 
 	// Signals about the current synchronization status.
 	// The current peer's status is used during packs downloading,
@@ -97,26 +88,11 @@ var errorToString = map[int]string{
 	ErrEmptyMessage:            "Empty message",
 }
 
-type txPool interface {
-	// AddRemotes should add the given transactions to the pool.
-	AddRemotes([]*types.Transaction) []error
-
-	// Pending should return pending transactions.
-	// The slice should be modifiable by the caller.
-	Pending() (map[common.Address]types.Transactions, error)
-
-	// SubscribeNewTxsNotify should return an event subscription of
-	// NewTxsNotify and send events to the given channel.
-	SubscribeNewTxsNotify(chan<- evmcore.NewTxsNotify) notify.Subscription
-}
-
-// ethStatusData is the network packet for the status message. It's used for compatibility with some ETH wallets.
-type ethStatusData struct {
-	ProtocolVersion   uint32
-	NetworkID         uint64
-	DummyTD           *big.Int
-	DummyCurrentBlock common.Hash
-	Genesis           common.Hash
+// statusData is the miniopera packet for the status message. It's used for compatibility with some ETH wallets.
+type statusData struct {
+	ProtocolVersion uint32
+	NetworkID       uint64
+	Genesis         common.Hash
 }
 
 // PeerProgress is synchronization status of a peer

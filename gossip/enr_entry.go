@@ -6,7 +6,7 @@ import (
 )
 
 // Enr is ENR entry which advertises eth protocol
-// on the discovery network.
+// on the discovery miniopera.
 type Enr struct {
 	ForkID forkid.ID
 	// Ignore additional fields (for forward compatibility).
@@ -15,7 +15,7 @@ type Enr struct {
 
 // ENRKey implements enr.Entry.
 func (e Enr) ENRKey() string {
-	return "lachesis"
+	return "miniopera"
 }
 
 func (s *Service) currentEnr() *Enr {

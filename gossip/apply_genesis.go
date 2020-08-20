@@ -2,15 +2,15 @@ package gossip
 
 import (
 	"fmt"
-	"math/big"
 
+	"github.com/Fantom-foundation/go-mini-opera/inter"
+	"github.com/Fantom-foundation/lachesis-base/abft"
+	"github.com/Fantom-foundation/lachesis-base/hash"
+	"github.com/Fantom-foundation/lachesis-base/inter/dag"
+	"github.com/Fantom-foundation/lachesis-base/inter/idx"
 	"github.com/ethereum/go-ethereum/common"
 
-	"github.com/Fantom-foundation/go-lachesis/hash"
-	"github.com/Fantom-foundation/go-lachesis/inter"
-	"github.com/Fantom-foundation/go-lachesis/inter/idx"
-	"github.com/Fantom-foundation/go-lachesis/inter/sfctype"
-	"github.com/Fantom-foundation/go-lachesis/lachesis"
+	"github.com/Fantom-foundation/go-mini-opera/miniopera"
 )
 
 // GenesisMismatchError is raised when trying to overwrite an existing
@@ -25,7 +25,7 @@ func (e *GenesisMismatchError) Error() string {
 }
 
 // ApplyGenesis writes initial state.
-func (s *Store) ApplyGenesis(net *lachesis.Config) (genesisAtropos hash.Event, genesisState common.Hash, new bool, err error) {
+func (s *Store) ApplyGenesis(net *miniopera.Config) (genesisAtropos hash.Event, genesisState common.Hash, new bool, err error) {
 	storedGenesis := s.GetBlock(0)
 	if storedGenesis != nil {
 		newHash := calcGenesisHash(net)
@@ -47,7 +47,7 @@ func (s *Store) ApplyGenesis(net *lachesis.Config) (genesisAtropos hash.Event, g
 }
 
 // calcGenesisHash calcs hash of genesis state.
-func calcGenesisHash(net *lachesis.Config) hash.Event {
+func calcGenesisHash(net *miniopera.Config) hash.Event {
 	s := NewMemStore()
 	defer s.Close()
 
@@ -56,46 +56,36 @@ func calcGenesisHash(net *lachesis.Config) hash.Event {
 	return h
 }
 
-func (s *Store) applyGenesis(net *lachesis.Config) (genesisAtropos hash.Event, genesisState common.Hash, err error) {
-	// apply app genesis
-	state, err := s.app.ApplyGenesis(net)
-	if err != nil {
-		return genesisAtropos, genesisState, err
-	}
-
-	prettyHash := func(net *lachesis.Config) hash.Event {
-		e := inter.NewEvent()
+func (s *Store) applyGenesis(net *miniopera.Config) (genesisAtropos hash.Event, genesisState common.Hash, err error) {
+	prettyHash := func(net *miniopera.Config) hash.Event {
+		e := inter.MutableEvent{}
 		// for nice-looking ID
-		e.Epoch = 0
-		e.Lamport = idx.Lamport(net.Dag.MaxEpochBlocks)
+		e.SetEpoch(0)
+		e.SetLamport(idx.Lamport(net.Dag.MaxEpochBlocks))
 		// actual data hashed
-		e.Extra = net.Genesis.ExtraData
-		e.ClaimedTime = net.Genesis.Time
-		e.TxHash = net.Genesis.Alloc.Accounts.Hash()
+		h := net.Genesis.Validators.Hash()
+		e.SetPayload(append(net.Genesis.ExtraData, h[:]...))
+		e.SetRawTime(dag.RawTimestamp(net.Genesis.Time))
 
-		return e.CalcHash()
+		return e.Build().ID()
 	}
 	genesisAtropos = prettyHash(net)
 	genesisState = common.Hash(genesisAtropos)
 
-	block := inter.NewBlock(0,
-		net.Genesis.Time,
-		genesisAtropos,
-		hash.Event{},
-		hash.Events{genesisAtropos},
-	)
+	block := &inter.Block{
+		Time:    net.Genesis.Time,
+		Atropos: genesisAtropos,
+		Events:  hash.Events{genesisAtropos},
+	}
+	s.SetBlock(0, block)
 
-	block.Root = state.Root
-	s.SetBlock(block)
-	s.SetBlockIndex(genesisAtropos, block.Index)
-	s.SetEpochStats(0, &sfctype.EpochStats{
-		Start:    net.Genesis.Time,
-		End:      net.Genesis.Time,
-		TotalFee: new(big.Int),
+	s.SetEpochState(EpochState{
+		Epoch:      abft.FirstEpoch,
+		Validators: net.Genesis.Validators.Build(),
 	})
-	s.SetDirtyEpochStats(&sfctype.EpochStats{
-		Start:    net.Genesis.Time,
-		TotalFee: new(big.Int),
+	s.SetBlockState(BlockState{
+		Block:       0,
+		EpochBlocks: 0,
 	})
 
 	return genesisAtropos, genesisState, nil

@@ -1,29 +1,24 @@
 package gossip
 
-/*
-	In LRU cache data stored like pointer
-*/
-
 import (
 	"bytes"
 
+	"github.com/Fantom-foundation/go-mini-opera/inter"
+	"github.com/Fantom-foundation/lachesis-base/hash"
+	"github.com/Fantom-foundation/lachesis-base/inter/idx"
+
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/rlp"
-
-	"github.com/Fantom-foundation/go-lachesis/hash"
-	"github.com/Fantom-foundation/go-lachesis/inter"
-	"github.com/Fantom-foundation/go-lachesis/inter/idx"
 )
 
-// DeleteEvent deletes event.
-func (s *Store) DeleteEvent(epoch idx.Epoch, id hash.Event) {
+// DelEvent deletes event.
+func (s *Store) DelEvent(id hash.Event) {
 	key := id.Bytes()
 
 	err := s.table.Events.Delete(key)
 	if err != nil {
 		s.Log.Crit("Failed to delete key", "err", err)
 	}
-	s.DelEventHeader(epoch, id)
 
 	// Remove from LRU cache.
 	if s.cache.Events != nil {
@@ -33,14 +28,13 @@ func (s *Store) DeleteEvent(epoch idx.Epoch, id hash.Event) {
 
 // SetEvent stores event.
 func (s *Store) SetEvent(e *inter.Event) {
-	key := e.Hash().Bytes()
+	key := e.ID().Bytes()
 
 	s.set(s.table.Events, key, e)
-	s.SetEventHeader(e.Epoch, e.Hash(), &e.EventHeaderData)
 
 	// Add to LRU cache.
 	if s.cache.Events != nil {
-		s.cache.Events.Add(e.Hash(), e)
+		s.cache.Events.Add(e.ID(), e)
 	}
 }
 

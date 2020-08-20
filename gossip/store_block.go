@@ -1,18 +1,17 @@
 package gossip
 
 import (
-	"github.com/Fantom-foundation/go-lachesis/hash"
-	"github.com/Fantom-foundation/go-lachesis/inter"
-	"github.com/Fantom-foundation/go-lachesis/inter/idx"
+	"github.com/Fantom-foundation/go-mini-opera/inter"
+	"github.com/Fantom-foundation/lachesis-base/inter/idx"
 )
 
 // SetBlock stores chain block.
-func (s *Store) SetBlock(b *inter.Block) {
-	s.set(s.table.Blocks, b.Index.Bytes(), b)
+func (s *Store) SetBlock(n idx.Block, b *inter.Block) {
+	s.set(s.table.Blocks, n.Bytes(), b)
 
 	// Add to LRU cache.
 	if b != nil && s.cache.Blocks != nil {
-		s.cache.Blocks.Add(b.Index, b)
+		s.cache.Blocks.Add(n, b)
 	}
 }
 
@@ -35,42 +34,4 @@ func (s *Store) GetBlock(n idx.Block) *inter.Block {
 	}
 
 	return block
-}
-
-// SetBlockIndex stores chain block index.
-func (s *Store) SetBlockIndex(id hash.Event, n idx.Block) {
-	if err := s.table.BlockHashes.Put(id.Bytes(), n.Bytes()); err != nil {
-		s.Log.Crit("Failed to put key-value", "err", err)
-	}
-
-	s.cache.BlockHashes.Add(id, n)
-}
-
-// GetBlockIndex returns stored block index.
-func (s *Store) GetBlockIndex(id hash.Event) *idx.Block {
-	nVal, ok := s.cache.BlockHashes.Get(id)
-	if ok {
-		n, ok := nVal.(idx.Block)
-		if ok {
-			return &n
-		}
-	}
-
-	buf, err := s.table.BlockHashes.Get(id.Bytes())
-	if err != nil {
-		s.Log.Crit("Failed to get key-value", "err", err)
-	}
-	if buf == nil {
-		return nil
-	}
-	n := idx.BytesToBlock(buf)
-
-	s.cache.BlockHashes.Add(id, n)
-
-	return &n
-}
-
-// GetBlockByHash get block by block hash
-func (s *Store) GetBlockByHash(id hash.Event) *inter.Block {
-	return s.GetBlock(*s.GetBlockIndex(id))
 }

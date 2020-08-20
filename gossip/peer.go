@@ -3,19 +3,18 @@ package gossip
 import (
 	"errors"
 	"fmt"
-	"math/big"
 	"sync"
 	"time"
 
+	"github.com/Fantom-foundation/lachesis-base/hash"
+	"github.com/Fantom-foundation/lachesis-base/inter/idx"
+
 	mapset "github.com/deckarep/golang-set"
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/p2p"
 	"github.com/ethereum/go-ethereum/rlp"
 
-	"github.com/Fantom-foundation/go-lachesis/hash"
-	"github.com/Fantom-foundation/go-lachesis/inter"
-	"github.com/Fantom-foundation/go-lachesis/inter/idx"
+	"github.com/Fantom-foundation/go-mini-opera/inter"
 )
 
 var (
@@ -25,13 +24,7 @@ var (
 )
 
 const (
-	maxKnownTxs    = 24576 // Maximum transactions hashes to keep in the known list (prevent DOS)
 	maxKnownEvents = 16384 // Maximum event hashes to keep in the known list (prevent DOS)
-
-	// maxQueuedTxs is the maximum number of transaction lists to queue up before
-	// dropping broadcasts. This is a sensitive number as a transaction list might
-	// contain a single transaction, or thousands.
-	maxQueuedTxs = 128
 
 	// maxQueuedProps is the maximum number of event propagations to queue up before
 	// dropping broadcasts.
@@ -60,12 +53,10 @@ type peer struct {
 
 	version int // Protocol version negotiated
 
-	knownTxs    mapset.Set                // Set of transaction hashes known to be known by this peer
-	knownEvents mapset.Set                // Set of event hashes known to be known by this peer
-	queuedTxs   chan []*types.Transaction // Queue of transactions to broadcast to the peer
-	queuedProps chan inter.Events         // Queue of events to broadcast to the peer
-	queuedAnns  chan hash.Events          // Queue of events to announce to the peer
-	term        chan struct{}             // Termination channel to stop the broadcaster
+	knownEvents mapset.Set        // Set of event hashes known to be known by this peer
+	queuedProps chan inter.Events // Queue of events to broadcast to the peer
+	queuedAnns  chan hash.Events  // Queue of events to announce to the peer
+	term        chan struct{}     // Termination channel to stop the broadcaster
 
 	progress PeerProgress
 
@@ -109,9 +100,7 @@ func newPeer(version int, p *p2p.Peer, rw p2p.MsgReadWriter) *peer {
 		rw:          rw,
 		version:     version,
 		id:          fmt.Sprintf("%x", p.ID().Bytes()[:8]),
-		knownTxs:    mapset.NewSet(),
 		knownEvents: mapset.NewSet(),
-		queuedTxs:   make(chan []*types.Transaction, maxQueuedTxs),
 		queuedProps: make(chan inter.Events, maxQueuedProps),
 		queuedAnns:  make(chan hash.Events, maxQueuedAnns),
 		term:        make(chan struct{}),
@@ -124,12 +113,6 @@ func newPeer(version int, p *p2p.Peer, rw p2p.MsgReadWriter) *peer {
 func (p *peer) broadcast() {
 	for {
 		select {
-		case txs := <-p.queuedTxs:
-			if err := p.SendTransactions(txs); err != nil {
-				return
-			}
-			p.Log().Trace("Broadcast transactions", "count", len(txs))
-
 		case events := <-p.queuedProps:
 			if err := p.SendEvents(events); err != nil {
 				return
@@ -172,46 +155,6 @@ func (p *peer) MarkEvent(hash hash.Event) {
 	p.knownEvents.Add(hash)
 }
 
-// MarkTransaction marks a transaction as known for the peer, ensuring that it
-// will never be propagated to this particular peer.
-func (p *peer) MarkTransaction(hash common.Hash) {
-	// If we reached the memory allowance, drop a previously known transaction hash
-	for p.knownTxs.Cardinality() >= maxKnownTxs {
-		p.knownTxs.Pop()
-	}
-	p.knownTxs.Add(hash)
-}
-
-// SendTransactions sends transactions to the peer and includes the hashes
-// in its transaction hash set for future reference.
-func (p *peer) SendTransactions(txs types.Transactions) error {
-	// Mark all the transactions as known, but ensure we don't overflow our limits
-	for _, tx := range txs {
-		p.knownTxs.Add(tx.Hash())
-	}
-	for p.knownTxs.Cardinality() >= maxKnownTxs {
-		p.knownTxs.Pop()
-	}
-	return p2p.Send(p.rw, EvmTxMsg, txs)
-}
-
-// AsyncSendTransactions queues list of transactions propagation to a remote
-// peer. If the peer's broadcast queue is full, the event is silently dropped.
-func (p *peer) AsyncSendTransactions(txs []*types.Transaction) {
-	select {
-	case p.queuedTxs <- txs:
-		// Mark all the transactions as known, but ensure we don't overflow our limits
-		for _, tx := range txs {
-			p.knownTxs.Add(tx.Hash())
-		}
-		for p.knownTxs.Cardinality() >= maxKnownTxs {
-			p.knownTxs.Pop()
-		}
-	default:
-		p.Log().Debug("Dropping transaction propagation", "count", len(txs))
-	}
-}
-
 // SendNewEventHashes announces the availability of a number of events through
 // a hash notification.
 func (p *peer) SendNewEventHashes(hashes []hash.Event) error {
@@ -247,7 +190,7 @@ func (p *peer) AsyncSendNewEventHashes(ids hash.Events) {
 func (p *peer) SendEvents(events inter.Events) error {
 	// Mark all the event hash as known, but ensure we don't overflow our limits
 	for _, event := range events {
-		p.knownEvents.Add(event.Hash())
+		p.knownEvents.Add(event.ID())
 		for p.knownEvents.Cardinality() >= maxKnownEvents {
 			p.knownEvents.Pop()
 		}
@@ -281,7 +224,7 @@ func (p *peer) AsyncSendEvents(events inter.Events) {
 	case p.queuedProps <- events:
 		// Mark all the event hash as known, but ensure we don't overflow our limits
 		for _, event := range events {
-			p.knownEvents.Add(event.Hash())
+			p.knownEvents.Add(event.ID())
 		}
 		for p.knownEvents.Cardinality() >= maxKnownEvents {
 			p.knownEvents.Pop()
@@ -290,32 +233,6 @@ func (p *peer) AsyncSendEvents(events inter.Events) {
 		p.Log().Debug("Dropping event propagation", "count", len(events))
 	}
 }
-
-// SendEventHeaders sends a batch of event headers to the remote peer.
-/*func (p *peer) SendEventHeaders(headers []*EvmHeader) error {
-	return p2p.Send(p.rw, EventHeadersMsg, headers)
-}*/
-
-/*// RequestOneHeader is a wrapper around the header query functions to fetch a
-// single header. It is used solely by the fetcher.
-func (p *peer) RequestOneHeader(hash common.Hash) error {
-	p.Log().Debug("Fetching single header", "hash", hash)
-	return p2p.Send(p.rw, GetEventHeadersMsg, &getEventHeadersData{Origin: hashOrNumber{Hash: hash}, Amount: uint64(1), Skip: uint64(0), Reverse: false})
-}
-
-// RequestHeadersByHash fetches a batch of events' headers corresponding to the
-// specified header query, based on the hash of an origin event.
-func (p *peer) RequestHeadersByHash(origin common.Hash, amount int, skip int, reverse bool) error {
-	p.Log().Debug("Fetching batch of headers", "count", amount, "fromhash", origin, "skip", skip, "reverse", reverse)
-	return p2p.Send(p.rw, GetEventHeadersMsg, &getEventHeadersData{Origin: hashOrNumber{Hash: origin}, Amount: uint64(amount), Skip: uint64(skip), Reverse: reverse})
-}
-
-// RequestHeadersByNumber fetches a batch of events' headers corresponding to the
-// specified header query, based on the number of an origin event.
-func (p *peer) RequestHeadersByNumber(origin uint64, amount int, skip int, reverse bool) error {
-	p.Log().Debug("Fetching batch of headers", "count", amount, "fromnum", origin, "skip", skip, "reverse", reverse)
-	return p2p.Send(p.rw, GetEventHeadersMsg, &getEventHeadersData{Origin: hashOrNumber{Number: origin}, Amount: uint64(amount), Skip: uint64(skip), Reverse: reverse})
-}*/
 
 func (p *peer) RequestEvents(ids hash.Events) error {
 	// divide big batch into smaller ones
@@ -348,20 +265,18 @@ func (p *peer) RequestPack(epoch idx.Epoch, index idx.Pack) error {
 }
 
 // Handshake executes the protocol handshake, negotiating version number,
-// network IDs, difficulties, head and genesis object.
+// miniopera IDs, difficulties, head and genesis object.
 func (p *peer) Handshake(network uint64, progress PeerProgress, genesis common.Hash) error {
 	// Send out own handshake in a new thread
 	errc := make(chan error, 2)
-	var status ethStatusData // safe to read after two values have been received from errc
+	var status statusData // safe to read after two values have been received from errc
 
 	go func() {
-		// send both EthStatusMsg and ProgressMsg, eth62 clients will understand only status
-		err := p2p.Send(p.rw, EthStatusMsg, &ethStatusData{
-			ProtocolVersion:   uint32(p.version),
-			NetworkID:         network,
-			Genesis:           genesis,
-			DummyTD:           big.NewInt(int64(progress.NumOfBlocks)), // for ETH clients
-			DummyCurrentBlock: common.Hash(progress.LastBlock),
+		// send both StatusMsg and ProgressMsg, eth62 clients will understand only status
+		err := p2p.Send(p.rw, StatusMsg, &statusData{
+			ProtocolVersion: uint32(p.version),
+			NetworkID:       network,
+			Genesis:         genesis,
 		})
 		if err != nil {
 			errc <- err
@@ -391,13 +306,13 @@ func (p *peer) SendProgress(progress PeerProgress) error {
 	return p2p.Send(p.rw, ProgressMsg, progress)
 }
 
-func (p *peer) readStatus(network uint64, status *ethStatusData, genesis common.Hash) (err error) {
+func (p *peer) readStatus(network uint64, status *statusData, genesis common.Hash) (err error) {
 	msg, err := p.rw.ReadMsg()
 	if err != nil {
 		return err
 	}
-	if msg.Code != EthStatusMsg {
-		return errResp(ErrNoStatusMsg, "first msg has code %x (!= %x)", msg.Code, EthStatusMsg)
+	if msg.Code != StatusMsg {
+		return errResp(ErrNoStatusMsg, "first msg has code %x (!= %x)", msg.Code, StatusMsg)
 	}
 	if msg.Size > protocolMaxMsgSize {
 		return errResp(ErrMsgTooLarge, "%v > %v", msg.Size, protocolMaxMsgSize)
@@ -421,7 +336,7 @@ func (p *peer) readStatus(network uint64, status *ethStatusData, genesis common.
 // String implements fmt.Stringer.
 func (p *peer) String() string {
 	return fmt.Sprintf("Peer %s [%s]", p.id,
-		fmt.Sprintf("lachesis/%2d", p.version),
+		fmt.Sprintf("miniopera/%2d", p.version),
 	)
 }
 
@@ -513,21 +428,6 @@ func (ps *peerSet) List() []*peer {
 	list := make([]*peer, 0, len(ps.peers))
 	for _, p := range ps.peers {
 		list = append(list, p)
-	}
-	return list
-}
-
-// PeersWithoutTx retrieves a list of peers that do not have a given transaction
-// in their set of known hashes.
-func (ps *peerSet) PeersWithoutTx(hash common.Hash) []*peer {
-	ps.lock.RLock()
-	defer ps.lock.RUnlock()
-
-	list := make([]*peer, 0, len(ps.peers))
-	for _, p := range ps.peers {
-		if !p.knownTxs.Contains(hash) {
-			list = append(list, p)
-		}
 	}
 	return list
 }

@@ -3,29 +3,29 @@ package integration
 import (
 	"time"
 
+	"github.com/Fantom-foundation/lachesis-base/inter/idx"
+
 	"github.com/ethereum/go-ethereum/p2p/simulations/adapters"
 
-	"github.com/Fantom-foundation/go-lachesis/gossip"
-	"github.com/Fantom-foundation/go-lachesis/lachesis"
+	"github.com/Fantom-foundation/go-mini-opera/gossip"
+	"github.com/Fantom-foundation/go-mini-opera/miniopera"
 )
 
 // NewIntegration creates gossip service for the integration test
-func NewIntegration(ctx *adapters.ServiceContext, network lachesis.Config) *gossip.Service {
+func NewIntegration(ctx *adapters.ServiceContext, network miniopera.Config, validator idx.ValidatorID) *gossip.Service {
 	gossipCfg := gossip.DefaultConfig(network)
 
 	engine, _, gdb := MakeEngine(ctx.Config.DataDir, &gossipCfg)
 
-	coinbase := SetAccountKey(
-		ctx.NodeContext.AccountManager,
-		ctx.Config.PrivateKey,
-		"fakepassword",
-	)
-
-	gossipCfg.Emitter.Validator = coinbase.Address
+	gossipCfg.Emitter.Validator = validator
 	gossipCfg.Emitter.EmitIntervals.Max = 3 * time.Second
-	gossipCfg.Emitter.EmitIntervals.SelfForkProtection = 0
+	gossipCfg.Emitter.EmitIntervals.DoublesignProtection = 0
 
 	svc, err := gossip.NewService(ctx.NodeContext, &gossipCfg, gdb, engine)
+	if err != nil {
+		panic(err)
+	}
+	err = engine.Bootstrap(svc.GetConsensusCallbacks())
 	if err != nil {
 		panic(err)
 	}

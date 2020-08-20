@@ -10,15 +10,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Fantom-foundation/lachesis-base/inter/idx"
+
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/node"
 	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/ethereum/go-ethereum/p2p/simulations"
 	"github.com/ethereum/go-ethereum/p2p/simulations/adapters"
 
-	"github.com/Fantom-foundation/go-lachesis/inter/pos"
-	"github.com/Fantom-foundation/go-lachesis/lachesis"
-	"github.com/Fantom-foundation/go-lachesis/lachesis/genesis"
+	"github.com/Fantom-foundation/go-mini-opera/miniopera"
+	"github.com/Fantom-foundation/go-mini-opera/miniopera/genesis"
 )
 
 type topology func(net *simulations.Network, nodes []enode.ID)
@@ -42,12 +43,14 @@ func testSim(t *testing.T, connect topology) {
 		log.StreamHandler(os.Stderr, log.TerminalFormat(false))))
 
 	// fake net
-	network := lachesis.FakeNetConfig(genesis.FakeValidators(count, big.NewInt(0), pos.StakeToBalance(10000)))
+	network := miniopera.FakeNetConfig(genesis.FakeValidators(count, big.NewInt(1000)))
 
 	// register a single gossip service
+	valCount := idx.ValidatorID(0)
 	services := map[string]adapters.ServiceFunc{
 		"gossip": func(ctx *adapters.ServiceContext) (node.Service, error) {
-			g := NewIntegration(ctx, network)
+			valCount++
+			g := NewIntegration(ctx, network, valCount)
 			return g, nil
 		},
 	}
@@ -59,16 +62,15 @@ func testSim(t *testing.T, connect topology) {
 	var adapter adapters.NodeAdapter
 	adapter = adapters.NewSimAdapter(services)
 
-	// create network
+	// create miniopera
 	sim := simulations.NewNetwork(adapter, &simulations.NetworkConfig{
 		DefaultService: serviceNames(services)[0],
 	})
 
 	// create and start nodes
 	nodes := make([]enode.ID, count)
-	addrs := network.Genesis.Alloc.Validators.Addresses()
-	for i, addr := range addrs {
-		key := network.Genesis.Alloc.Accounts[addr].PrivateKey
+	for i := range network.Genesis.Validators {
+		key := genesis.FakeKey(i)
 		id := enode.PubkeyToIDV4(&key.PublicKey)
 		config := &adapters.NodeConfig{
 			ID:         id,

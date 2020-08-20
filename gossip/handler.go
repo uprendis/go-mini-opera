@@ -7,33 +7,29 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Fantom-foundation/lachesis-base/gossip/fetcher"
+	"github.com/Fantom-foundation/lachesis-base/gossip/ordering"
+	"github.com/Fantom-foundation/lachesis-base/gossip/packsdownloader"
+	"github.com/Fantom-foundation/lachesis-base/hash"
+	"github.com/Fantom-foundation/lachesis-base/inter/dag"
+	"github.com/Fantom-foundation/lachesis-base/inter/idx"
+
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core/types"
 	notify "github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/p2p"
 	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/ethereum/go-ethereum/rlp"
 
-	"github.com/Fantom-foundation/go-lachesis/eventcheck"
-	"github.com/Fantom-foundation/go-lachesis/evmcore"
-	"github.com/Fantom-foundation/go-lachesis/gossip/fetcher"
-	"github.com/Fantom-foundation/go-lachesis/gossip/ordering"
-	"github.com/Fantom-foundation/go-lachesis/gossip/packsdownloader"
-	"github.com/Fantom-foundation/go-lachesis/hash"
-	"github.com/Fantom-foundation/go-lachesis/inter"
-	"github.com/Fantom-foundation/go-lachesis/inter/idx"
-	"github.com/Fantom-foundation/go-lachesis/logger"
+	"github.com/Fantom-foundation/go-mini-opera/eventcheck"
+	"github.com/Fantom-foundation/go-mini-opera/inter"
+	"github.com/Fantom-foundation/go-mini-opera/logger"
 )
 
 const (
 	softResponseLimitSize = 2 * 1024 * 1024    // Target maximum size of returned events, or other data.
-	softLimitItems        = 250                // Target maximum number of events or transactions to request/response
-	hardLimitItems        = softLimitItems * 4 // Maximum number of events or transactions to request/response
-
-	// txChanSize is the size of channel listening to NewTxsNotify.
-	// The number is referenced from the size of tx pool.
-	txChanSize = 4096
+	softLimitItems        = 250                // Target maximum number of events to request/response
+	hardLimitItems        = softLimitItems * 4 // Maximum number of events to request/response
 
 	// the maximum number of events in the ordering buffer
 	eventsBuffSize = 2048
@@ -62,25 +58,22 @@ type dagNotifier interface {
 type ProtocolManager struct {
 	config *Config
 
-	synced uint32 // Flag whether we're considered synchronised (enables transaction processing, events broadcasting)
+	synced uint32 // Flag whether we're considered synchronised (enables events broadcasting)
 
-	txpool   txPool
 	maxPeers int
 
 	peers *peerSet
 
 	serverPool *serverPool
 
-	txsCh  chan evmcore.NewTxsNotify
-	txsSub notify.Subscription
-
 	downloader *packsdownloader.PacksDownloader
 	fetcher    *fetcher.Fetcher
 	buffer     *ordering.EventBuffer
 
-	store    *Store
-	engine   Consensus
-	engineMu *sync.RWMutex
+	store        *Store
+	processEvent func(*inter.Event) error
+	engineMu     *sync.RWMutex
+	checkers     *eventcheck.Checkers
 
 	notifier         dagNotifier
 	emittedEventsCh  chan *inter.Event
@@ -92,7 +85,6 @@ type ProtocolManager struct {
 
 	// channels for fetcher, syncer, txsyncLoop
 	newPeerCh   chan *peer
-	txsyncCh    chan *txsync
 	quitSync    chan struct{}
 	noMorePeers chan struct{}
 
@@ -105,15 +97,14 @@ type ProtocolManager struct {
 }
 
 // NewProtocolManager returns a new Fantom sub protocol manager. The Fantom sub protocol manages peers capable
-// with the Fantom network.
+// with the Fantom miniopera.
 func NewProtocolManager(
 	config *Config,
 	notifier dagNotifier,
-	txpool txPool,
 	engineMu *sync.RWMutex,
 	checkers *eventcheck.Checkers,
 	s *Store,
-	engine Consensus,
+	processEvent func(*inter.Event) error,
 	serverPool *serverPool,
 ) (
 	*ProtocolManager,
@@ -121,18 +112,17 @@ func NewProtocolManager(
 ) {
 	// Create the protocol manager with the base fields
 	pm := &ProtocolManager{
-		config:      config,
-		notifier:    notifier,
-		txpool:      txpool,
-		store:       s,
-		engine:      engine,
-		peers:       newPeerSet(),
-		serverPool:  serverPool,
-		engineMu:    engineMu,
-		newPeerCh:   make(chan *peer),
-		noMorePeers: make(chan struct{}),
-		txsyncCh:    make(chan *txsync),
-		quitSync:    make(chan struct{}),
+		config:       config,
+		notifier:     notifier,
+		store:        s,
+		processEvent: processEvent,
+		peers:        newPeerSet(),
+		serverPool:   serverPool,
+		engineMu:     engineMu,
+		newPeerCh:    make(chan *peer),
+		noMorePeers:  make(chan struct{}),
+		quitSync:     make(chan struct{}),
+		checkers:     checkers,
 
 		Instance: logger.MakeInstance(),
 	}
@@ -140,14 +130,23 @@ func NewProtocolManager(
 	pm.SetName("PM")
 
 	pm.fetcher, pm.buffer = pm.makeFetcher(checkers)
-	pm.downloader = packsdownloader.New(pm.fetcher, pm.onlyNotConnectedEvents, pm.removePeer)
+	pm.downloader = packsdownloader.New(pm.fetcher, pm.onlyNotConnectedEvents, pm.peerMisbehaviour, packsdownloader.DefaultConfig())
 
 	return pm, nil
 }
 
+func (pm *ProtocolManager) peerMisbehaviour(peer string, err error) bool {
+	if eventcheck.IsBan(err) && err != packsdownloader.ErrAllUnknownBeforeKnown {
+		log.Warn("Dropping peer due to a misbehaviour", "peer", peer, "err", err)
+		pm.removePeer(peer)
+		return true
+	}
+	return false
+}
+
 func (pm *ProtocolManager) makeFetcher(checkers *eventcheck.Checkers) (*fetcher.Fetcher, *ordering.EventBuffer) {
 	// checkers
-	firstCheck := func(e *inter.Event) error {
+	lightCheck := func(e dag.Event) error {
 		if err := checkers.Basiccheck.Validate(e); err != nil {
 			return err
 		}
@@ -156,15 +155,8 @@ func (pm *ProtocolManager) makeFetcher(checkers *eventcheck.Checkers) (*fetcher.
 		}
 		return nil
 	}
-	bufferedCheck := func(e *inter.Event, parents []*inter.EventHeaderData) error {
-		var selfParent *inter.EventHeaderData
-		if e.SelfParent() != nil {
-			selfParent = parents[0]
-		}
+	bufferedCheck := func(e dag.Event, parents dag.Events) error {
 		if err := checkers.Parentscheck.Validate(e, parents); err != nil {
-			return err
-		}
-		if err := checkers.Gaspowercheck.Validate(e, selfParent); err != nil {
 			return err
 		}
 		return nil
@@ -173,51 +165,56 @@ func (pm *ProtocolManager) makeFetcher(checkers *eventcheck.Checkers) (*fetcher.
 	// DAG callbacks
 	buffer := ordering.New(eventsBuffSize, ordering.Callback{
 
-		Process: func(e *inter.Event) error {
+		Process: func(de dag.Event) error {
+			e := de.(*inter.Event)
 			now := time.Now()
 			pm.engineMu.Lock()
 			defer pm.engineMu.Unlock()
 
 			start := time.Now()
-			err := pm.engine.ProcessEvent(e)
+			err := pm.processEvent(e)
 			if err != nil {
 				return err
 			}
-			log.Info("New event", "id", e.Hash(), "parents", len(e.Parents), "by", e.Creator, "frame", inter.FmtFrame(e.Frame, e.IsRoot), "txs", e.Transactions.Len(), "t", time.Since(start))
+			log.Info("New event", "id", e.ID(), "parents", len(e.Parents()), "by", e.Creator(), "frame", inter.FmtFrame(e.Frame(), e.IsRoot()), "payload", len(e.Payload()), "t", time.Since(start))
 
 			// If the event is indeed in our own graph, announce it
 			if atomic.LoadUint32(&pm.synced) != 0 { // announce only if synced up
-				passedSinceEvent := now.Sub(e.ClaimedTime.Time())
+				passedSinceEvent := now.Sub(e.CreationTime().Time())
 				pm.BroadcastEvent(e, passedSinceEvent)
 			}
 
 			return nil
 		},
 
-		Drop: func(e *inter.Event, peer string, err error) {
+		Drop: func(e dag.Event, peer string, err error) {
 			if eventcheck.IsBan(err) {
-				log.Warn("Incoming event rejected", "event", e.Hash().String(), "creator", e.Creator, "err", err)
+				log.Warn("Incoming event rejected", "event", e.ID().String(), "creator", e.Creator, "err", err)
 				pm.removePeer(peer)
 			}
 		},
 
 		Exists: func(id hash.Event) bool {
-			return pm.store.HasEventHeader(id)
+			return pm.store.HasEvent(id)
 		},
 
-		Get: func(id hash.Event) *inter.EventHeaderData {
-			return pm.store.GetEventHeader(id.Epoch(), id)
+		Get: func(id hash.Event) dag.Event {
+			e := pm.store.GetEvent(id)
+			if e == nil {
+				return nil
+			}
+			return e
 		},
 
 		Check: bufferedCheck,
 	})
 
 	newFetcher := fetcher.New(fetcher.Callback{
-		PushEvent:      buffer.PushEvent,
-		OnlyInterested: pm.onlyInterestedEvents,
-		DropPeer:       pm.removePeer,
-		FirstCheck:     firstCheck,
-		HeavyCheck:     checkers.Heavycheck,
+		PushEvent:        buffer.PushEvent,
+		OnlyInterested:   pm.onlyInterestedEvents,
+		PeerMisbehaviour: pm.peerMisbehaviour,
+		LightCheck:       lightCheck,
+		HeavyCheck:       checkers.Heavycheck,
 	})
 	return newFetcher, buffer
 }
@@ -229,7 +226,7 @@ func (pm *ProtocolManager) onlyNotConnectedEvents(ids hash.Events) hash.Events {
 
 	notConnected := make(hash.Events, 0, len(ids))
 	for _, id := range ids {
-		if pm.store.HasEventHeader(id) {
+		if pm.store.HasEvent(id) {
 			continue
 		}
 		notConnected.Add(id)
@@ -241,14 +238,14 @@ func (pm *ProtocolManager) onlyInterestedEvents(ids hash.Events) hash.Events {
 	if len(ids) == 0 {
 		return ids
 	}
-	epoch := pm.engine.GetEpoch()
+	epoch := pm.store.GetEpoch()
 
 	interested := make(hash.Events, 0, len(ids))
 	for _, id := range ids {
 		if id.Epoch() != epoch {
 			continue
 		}
-		if pm.buffer.IsBuffered(id) || pm.store.HasEventHeader(id) {
+		if pm.buffer.IsBuffered(id) || pm.store.HasEvent(id) {
 			continue
 		}
 		interested.Add(id)
@@ -323,13 +320,6 @@ func (pm *ProtocolManager) removePeer(id string) {
 func (pm *ProtocolManager) Start(maxPeers int) {
 	pm.maxPeers = maxPeers
 
-	// broadcast transactions
-	pm.txsCh = make(chan evmcore.NewTxsNotify, txChanSize)
-	pm.txsSub = pm.txpool.SubscribeNewTxsNotify(pm.txsCh)
-
-	pm.loopsWg.Add(1)
-	go pm.txBroadcastLoop()
-
 	if pm.notifier != nil {
 		// broadcast mined events
 		pm.emittedEventsCh = make(chan *inter.Event, 4)
@@ -349,17 +339,17 @@ func (pm *ProtocolManager) Start(maxPeers int) {
 
 	// start sync handlers
 	go pm.syncer()
-	go pm.txsyncLoop()
 	pm.fetcher.Start()
+	pm.checkers.Heavycheck.Start()
 }
 
 func (pm *ProtocolManager) Stop() {
 	log.Info("Stopping Fantom protocol")
 
+	pm.checkers.Heavycheck.Stop()
 	pm.downloader.Terminate()
 	pm.fetcher.Stop()
 
-	pm.txsSub.Unsubscribe() // quits txBroadcastLoop
 	if pm.notifier != nil {
 		pm.emittedEventsSub.Unsubscribe() // quits eventBroadcastLoop
 		pm.newPacksSub.Unsubscribe()      // quits progressBroadcastLoop
@@ -390,8 +380,9 @@ func (pm *ProtocolManager) newPeer(pv int, p *p2p.Peer, rw p2p.MsgReadWriter) *p
 }
 
 func (pm *ProtocolManager) myProgress() PeerProgress {
-	blockI, block := pm.engine.LastBlock()
-	epoch := pm.engine.GetEpoch()
+	blockI := pm.store.GetLatestBlockIndex()
+	block := pm.store.GetBlock(blockI).Atropos
+	epoch := pm.store.GetEpoch()
 	return PeerProgress{
 		Epoch:        epoch,
 		NumOfBlocks:  blockI,
@@ -422,10 +413,10 @@ func (pm *ProtocolManager) handle(p *peer) error {
 
 	// Execute the handshake
 	var (
-		genesis    = pm.engine.GetGenesisHash()
+		genesis    = pm.store.GetBlock(0).Atropos
 		myProgress = pm.myProgress()
 	)
-	if err := p.Handshake(pm.config.Net.NetworkID, myProgress, genesis); err != nil {
+	if err := p.Handshake(pm.config.Net.NetworkID, myProgress, common.Hash(genesis)); err != nil {
 		p.Log().Debug("Handshake failed", "err", err)
 		return err
 	}
@@ -438,10 +429,6 @@ func (pm *ProtocolManager) handle(p *peer) error {
 		return err
 	}
 	defer pm.removePeer(p.id)
-
-	// Propagate existing transactions. new transactions appearing
-	// after this will be sent via broadcasts.
-	pm.syncTransactions(p)
 
 	// Handle incoming messages until the connection is torn down
 	for {
@@ -465,12 +452,12 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 	}
 	defer msg.Discard()
 
-	myEpoch := pm.engine.GetEpoch()
+	myEpoch := pm.store.GetEpoch()
 	peerDwnlr := pm.downloader.Peer(p.id)
 
 	// Handle the message depending on its contents
 	switch {
-	case msg.Code == EthStatusMsg:
+	case msg.Code == StatusMsg:
 		// Status messages should never arrive after the handshake
 		return errResp(ErrExtraStatusMsg, "uncontrolled status message")
 
@@ -523,7 +510,7 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 		if pm.fetcher.Overloaded() {
 			break
 		}
-		var events []*inter.Event
+		var events inter.Events
 		if err := msg.Decode(&events); err != nil {
 			return errResp(ErrDecode, "%v: %v", msg, err)
 		}
@@ -532,28 +519,9 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 		}
 		// Mark the hashes as present at the remote node
 		for _, e := range events {
-			p.MarkEvent(e.Hash())
+			p.MarkEvent(e.ID())
 		}
-		_ = pm.fetcher.Enqueue(p.id, events, time.Now(), p.RequestEvents)
-
-	case msg.Code == EvmTxMsg:
-		// Transactions arrived, make sure we have a valid and fresh graph to handle them
-		if atomic.LoadUint32(&pm.synced) == 0 {
-			break
-		}
-		// Transactions can be processed, parse all of them and deliver to the pool
-		var txs []*types.Transaction
-		if err := msg.Decode(&txs); err != nil {
-			return errResp(ErrDecode, "msg %v: %v", msg, err)
-		}
-		for i, tx := range txs {
-			// Validate and mark the remote transaction
-			if tx == nil {
-				return errResp(ErrDecode, "transaction %d is nil", i)
-			}
-			p.MarkTransaction(tx.Hash())
-		}
-		pm.txpool.AddRemotes(txs)
+		_ = pm.fetcher.Enqueue(p.id, events.Bases(), time.Now(), p.RequestEvents)
 
 	case msg.Code == GetEventsMsg:
 		var requests hash.Events
@@ -747,7 +715,7 @@ func (pm *ProtocolManager) BroadcastEvent(event *inter.Event, passed time.Durati
 	if passed < 0 {
 		passed = 0
 	}
-	id := event.Hash()
+	id := event.ID()
 	peers := pm.peers.PeersWithoutEvent(id)
 	if len(peers) == 0 {
 		log.Trace("Event is already known to all peers", "hash", id)
@@ -764,33 +732,10 @@ func (pm *ProtocolManager) BroadcastEvent(event *inter.Event, passed time.Durati
 	// Broadcast of event hash to the rest peers
 	hashBroadcast := peers[fullRecipients:]
 	for _, peer := range hashBroadcast {
-		peer.AsyncSendNewEventHashes(hash.Events{event.Hash()})
+		peer.AsyncSendNewEventHashes(hash.Events{event.ID()})
 	}
 	log.Trace("Broadcast event", "hash", id, "fullRecipients", len(fullBroadcast), "hashRecipients", len(hashBroadcast))
 	return len(peers)
-}
-
-// BroadcastTxs will propagate a batch of transactions to all peers which are not known to
-// already have the given transaction.
-func (pm *ProtocolManager) BroadcastTxs(txs types.Transactions) {
-	if len(txs) > softLimitItems {
-		txs = txs[:softLimitItems]
-	}
-
-	var txset = make(map[*peer]types.Transactions)
-
-	// Broadcast transactions to a batch of peers not knowing about it
-	for _, tx := range txs {
-		peers := pm.peers.PeersWithoutTx(tx.Hash())
-		for _, peer := range peers {
-			txset[peer] = append(txset[peer], tx)
-		}
-		log.Trace("Broadcast transaction", "hash", tx.Hash(), "recipients", len(peers))
-	}
-	// FIXME include this again: peers = peers[:int(math.Sqrt(float64(len(peers))))]
-	for peer, txs := range txset {
-		peer.AsyncSendTransactions(txs)
-	}
 }
 
 // Mined broadcast loop
@@ -864,25 +809,11 @@ func (pm *ProtocolManager) onNewEpochLoop() {
 	}
 }
 
-func (pm *ProtocolManager) txBroadcastLoop() {
-	defer pm.loopsWg.Done()
-	for {
-		select {
-		case notify := <-pm.txsCh:
-			pm.BroadcastTxs(notify.Txs)
-
-		// Err() channel will be closed when unsubscribing.
-		case <-pm.txsSub.Err():
-			return
-		}
-	}
-}
-
 // NodeInfo represents a short summary of the sub-protocol metadata
 // known about the host peer.
 type NodeInfo struct {
-	Network     uint64      `json:"network"` // network ID
-	Genesis     common.Hash `json:"genesis"` // SHA3 hash of the host's genesis object
+	Network     uint64      `json:"miniopera"` // miniopera ID
+	Genesis     common.Hash `json:"genesis"`   // SHA3 hash of the host's genesis object
 	Epoch       idx.Epoch   `json:"epoch"`
 	NumOfBlocks idx.Block   `json:"blocks"`
 	//Config  *params.ChainConfig `json:"config"`  // Chain configuration for the fork rules
@@ -890,11 +821,11 @@ type NodeInfo struct {
 
 // NodeInfo retrieves some protocol metadata about the running host node.
 func (pm *ProtocolManager) NodeInfo() *NodeInfo {
-	numOfBlocks, _ := pm.engine.LastBlock()
+	numOfBlocks := pm.store.GetLatestBlockIndex()
 	return &NodeInfo{
 		Network:     pm.config.Net.NetworkID,
-		Genesis:     pm.engine.GetGenesisHash(),
-		Epoch:       pm.engine.GetEpoch(),
+		Genesis:     common.Hash(pm.store.GetBlock(0).Atropos),
+		Epoch:       pm.store.GetEpoch(),
 		NumOfBlocks: numOfBlocks,
 	}
 }
