@@ -14,11 +14,11 @@ LIMIT_CPU=$(echo "scale=2; 1/$N" | bc)
 LIMIT_IO=$(echo "500/$N" | bc)
 
 # base dir for running demo
-LACHESIS_BASE_DIR=/tmp/lachesis-demo
+LACHESIS_BASE_DIR=/tmp/miniopera-demo
 
 #
-PROG=lachesis
-EXEC=../build/lachesis
+PROG=miniopera
+EXEC=../build/miniopera
 
 # default ip using localhost
 IP=127.0.0.1
@@ -55,10 +55,10 @@ start_node() {
 
     ${EXEC} \
 	--fakenet $i/$N \
-	--port ${localport} --rpc --rpcapi "eth,dag,debug,admin,web3" --rpcport ${port} --nousb --verbosity 3 \
+	--port ${localport} --rpc --rpcapi "admin,net" --rpcport ${port} --nousb --verbosity 3 \
 	--datadir "${LACHESIS_BASE_DIR}/datadir/lach$i" &
 	pids+=($!)
-    echo -e "Started lachesis client at ${IP}:${port}, pid: $!"
+    echo -e "Started miniopera client at ${IP}:${port}, pid: $!"
     echo -e "\n"
 }
 

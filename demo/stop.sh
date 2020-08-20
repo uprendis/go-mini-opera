@@ -1,9 +1,10 @@
 #!/bin/bash
 
-PROG=lachesis
+PROG=miniopera
 
-# kill all lachesis processes
-pkill "${PROG}"
+# kill all miniopera processes
+killall "${PROG}"
+sleep 3
 
 # remove demo data
-rm -rf /tmp/lachesis-demo/datadir/
+rm -rf /tmp/miniopera-demo/datadir/

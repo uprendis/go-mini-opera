@@ -7,12 +7,10 @@ set -e
 
 # number of nodes N
 N=5
-LIMIT_CPU=$(echo "scale=2; 1/$N" | bc)
-LIMIT_IO=$(echo "500/$N" | bc)
 
 #
-PROG=lachesis
-EXEC=../build/lachesis
+PROG=miniopera
+EXEC=../build/miniopera
 
 # default ip using localhost
 IP=127.0.0.1
@@ -21,7 +19,7 @@ IP=127.0.0.1
 #PORT=18540
 PORT=4000
 
-declare -r LACHESIS_BASE_DIR=/tmp/lachesis-demo
+declare -r LACHESIS_BASE_DIR=/tmp/miniopera-demo
 
 
 echo -e "\nStart $N nodes:"
@@ -32,9 +30,11 @@ do
 
     ${EXEC} \
 	--fakenet $i/$N \
-	--port ${localport} --rpc --rpcapi "eth,ftm,debug,admin,web3,personal,net,txpool" --rpcport ${port} --nousb --verbosity 3 \
+	--payload 100000 --bps 1000000 \
+	--nat extip:${IP} \
+	--port ${localport} --rpc --rpcapi "admin,net" --rpcport ${port} --nousb --verbosity 3 \
 	--datadir "${LACHESIS_BASE_DIR}/datadir/lach$i" &
-    echo -e "Started lachesis client at ${IP}:${port}"
+    echo -e "Started miniopera client at ${IP}:${port}"
 done
 
 
