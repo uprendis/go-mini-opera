@@ -6,30 +6,32 @@ import (
 	"math/rand"
 	"testing"
 
+	"github.com/Fantom-foundation/lachesis-base/hash"
+	"github.com/Fantom-foundation/lachesis-base/inter/dag"
+	"github.com/Fantom-foundation/lachesis-base/inter/idx"
+
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/stretchr/testify/assert"
 
-	"github.com/Fantom-foundation/go-lachesis/hash"
-	"github.com/Fantom-foundation/go-lachesis/inter/idx"
-	"github.com/Fantom-foundation/go-lachesis/utils/fast"
+	"github.com/Fantom-foundation/go-mini-opera/utils/fast"
 )
 
 func TestEventHeaderDataSerialization(t *testing.T) {
-	ee := map[string]EventHeaderData{
-		"empty": EventHeaderData{
-			Parents: hash.Events{},
-			TxHash:  EmptyTxHash,
-			Extra:   []uint8{},
-		},
-		"max": EventHeaderData{
-			Epoch:        idx.Epoch(math.MaxUint32),
-			GasPowerLeft: GasPowerLeft{Gas: [2]uint64{math.MaxUint64, math.MaxUint64}},
-			Parents: hash.Events{
-				hash.BytesToEvent(bytes.Repeat([]byte{math.MaxUint8}, 32)),
-			},
-			Extra: []uint8{},
-		},
-		"random": FakeEvent().EventHeaderData,
+	empty := MutableEvent{}
+	empty.SetParents(hash.Events{})
+	empty.SetPayload([]byte{})
+
+	max := MutableEvent{}
+	max.SetEpoch(math.MaxUint32)
+	max.SetParents(hash.Events{hash.BytesToEvent(bytes.Repeat([]byte{math.MaxUint8}, 32))})
+	max.SetSig(BytesToSignature(bytes.Repeat([]byte{math.MaxUint8}, 64)))
+	max.SetPayload(bytes.Repeat([]byte{math.MaxUint8}, 100))
+	max.SetIsRoot(true)
+
+	ee := map[string]Event{
+		"empty":  *empty.Build(),
+		"max":    *max.Build(),
+		"random": *FakeEvent(),
 	}
 
 	t.Run("ok", func(t *testing.T) {
@@ -41,13 +43,22 @@ func TestEventHeaderDataSerialization(t *testing.T) {
 				return
 			}
 
-			var header1 EventHeaderData
+			var header1 Event
 			err = rlp.DecodeBytes(buf, &header1)
 			if !assertar.NoError(err, name) {
 				return
 			}
 
 			if !assert.EqualValues(t, header0, header1, name) {
+				return
+			}
+			if !assert.EqualValues(t, header0.ID(), header1.ID(), name) {
+				return
+			}
+			if !assert.EqualValues(t, header0.HashToSign(), header1.HashToSign(), name) {
+				return
+			}
+			if !assert.EqualValues(t, header0.Size(), header1.Size(), name) {
 				return
 			}
 		}
@@ -62,7 +73,7 @@ func TestEventHeaderDataSerialization(t *testing.T) {
 				return
 			}
 
-			n := rand.Intn(len(bin) - len(header0.Extra))
+			n := rand.Intn(len(bin) - len(header0.Payload()) - 1)
 			bin = bin[0:n]
 
 			buf, err := rlp.EncodeToBytes(bin)
@@ -70,7 +81,7 @@ func TestEventHeaderDataSerialization(t *testing.T) {
 				return
 			}
 
-			var header1 EventHeaderData
+			var header1 Event
 			err = rlp.DecodeBytes(buf, &header1)
 			if !assertar.Error(err, name) {
 				return
@@ -81,7 +92,7 @@ func TestEventHeaderDataSerialization(t *testing.T) {
 }
 
 func BenchmarkEventHeaderData_EncodeRLP(b *testing.B) {
-	header := FakeEvent().EventHeaderData
+	header := FakeEvent()
 
 	b.ResetTimer()
 
@@ -95,7 +106,7 @@ func BenchmarkEventHeaderData_EncodeRLP(b *testing.B) {
 }
 
 func BenchmarkEventHeaderData_DecodeRLP(b *testing.B) {
-	header := FakeEvent().EventHeaderData
+	header := FakeEvent()
 
 	buf, err := rlp.EncodeToBytes(&header)
 	if err != nil {
@@ -148,23 +159,15 @@ func TestReadUintCompact(t *testing.T) {
 
 // FakeEvent generates random event for testing purpose.
 func FakeEvent() *Event {
-	var epoch idx.Epoch = hash.FakeEpoch()
+	r := rand.New(rand.NewSource(int64(0)))
+	random := MutableEvent{}
+	random.SetLamport(idx.Lamport(r.Uint32()))
+	random.SetPayload([]byte{byte(r.Uint32())})
+	random.SetSeq(idx.Event(r.Uint32() >> 8))
+	random.SetCreator(idx.ValidatorID(r.Uint32()))
+	random.SetFrame(idx.Frame(r.Uint32() >> 16))
+	random.SetRawTime(dag.RawTimestamp(r.Uint64()))
+	random.SetParents(hash.Events{})
 
-	e := NewEvent()
-	e.Epoch = epoch
-	e.Seq = idx.Event(9)
-	e.GasPowerLeft.Gas[0] = 0x010000
-	e.GasPowerLeft.Gas[1] = 100
-	e.Creator = hash.FakePeer()
-	e.Parents = hash.FakeEvents(8)
-	e.PrevEpochHash = hash.FakeHash()
-	e.Extra = make([]byte, 10, 10)
-	e.Sig = []byte{}
-
-	_, err := rand.Read(e.Extra)
-	if err != nil {
-		panic(err)
-	}
-
-	return e
+	return random.Build()
 }

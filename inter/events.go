@@ -1,9 +1,11 @@
 package inter
 
 import (
+	"bytes"
 	"strings"
 
-	"github.com/Fantom-foundation/go-lachesis/hash"
+	"github.com/Fantom-foundation/lachesis-base/hash"
+	"github.com/Fantom-foundation/lachesis-base/inter/dag"
 )
 
 // Events is a ordered slice of events.
@@ -18,32 +20,29 @@ func (ee Events) String() string {
 	return strings.Join(ss, " ")
 }
 
-// ByParents returns events topologically ordered by parent dependency.
-// Used only for tests.
-func (ee Events) ByParents() (res Events) {
-	unsorted := make(Events, len(ee))
-	exists := hash.EventsSet{}
-	for i, e := range ee {
-		unsorted[i] = e
-		exists.Add(e.Hash())
+// Add appends hash to the slice.
+func (ee *Events) Add(e ...*Event) {
+	*ee = append(*ee, e...)
+}
+
+func (ee Events) IDs() hash.Events {
+	res := make(hash.Events, 0, len(ee))
+	for _, e := range ee {
+		res.Add(e.ID())
 	}
-	ready := hash.EventsSet{}
-	for len(unsorted) > 0 {
-	EVENTS:
-		for i, e := range unsorted {
+	return res
+}
 
-			for _, p := range e.Parents {
-				if exists.Contains(p) && !ready.Contains(p) {
-					continue EVENTS
-				}
-			}
-
-			res = append(res, e)
-			unsorted = append(unsorted[0:i], unsorted[i+1:]...)
-			ready.Add(e.Hash())
-			break
-		}
+func (ee Events) Bases() dag.Events {
+	res := make(dag.Events, 0, ee.Len())
+	for _, e := range ee {
+		res = append(res, e)
 	}
+	return res
+}
 
-	return
+func (hh Events) Len() int      { return len(hh) }
+func (hh Events) Swap(i, j int) { hh[i], hh[j] = hh[j], hh[i] }
+func (hh Events) Less(i, j int) bool {
+	return bytes.Compare(hh[i].ID().Bytes(), hh[j].ID().Bytes()) < 0
 }
