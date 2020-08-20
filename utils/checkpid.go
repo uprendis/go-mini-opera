@@ -18,7 +18,7 @@ func CheckPid(pidfileName string) error {
 		}
 		err = process.Signal(syscall.Signal(0))
 		if err == nil {
-			return fmt.Errorf("perhaps another lachesis is already running with pid %d", pid)
+			return fmt.Errorf("perhaps another miniopera is already running with pid %d", pid)
 		}
 	}
 
